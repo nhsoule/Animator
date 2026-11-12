@@ -1,0 +1,10 @@
+build/
+__pycache__/
+*.pyc
+
+# Local working copies. The examples under these folders stay in the repo.
+/scenes/*
+!/scenes/examples/
+
+/models/*
+!/models/examples/
