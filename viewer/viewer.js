@@ -116,7 +116,7 @@ async function boot(rev) {
   if (typeof createAnim !== "function") throw new Error("scene.js did not export createAnim");
   module = await createAnim({
     canvas,
-    locateFile: (path) => path.replace(/^.*\//, "") + "?rev=" + encodeURIComponent(rev),
+    locateFile: (path) => (path.endsWith(".wasm") ? "scene.wasm" : path.replace(/^.*\//, "")) + "?rev=" + encodeURIComponent(rev),
   });
   module._anim_start();
   restoreUi();
