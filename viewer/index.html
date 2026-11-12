@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Animator</title>
 <style>
   html, body { margin: 0; height: 100%; background: #1c1f24; color: #e7e4de; font: 14px/1.4 ui-sans-serif, system-ui, sans-serif; }
@@ -11,10 +11,11 @@
   #panel { width: 260px; flex: none; overflow: auto; background: #262b33; padding: 14px 14px 24px; box-sizing: border-box; }
   h1 { font-size: 16px; font-weight: 650; margin: 0 0 10px; letter-spacing: 0.02em; }
   .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
-  button { background: #3a4250; color: inherit; border: 0; border-radius: 6px; padding: 7px 10px; font: inherit; cursor: pointer; }
+  button { background: #3a4250; color: inherit; border: 0; border-radius: 6px; padding: 7px 10px; font: inherit; cursor: pointer; touch-action: manipulation; }
   button.on { background: #3d6b8a; }
-  label.slider { display: block; margin: 12px 0 4px; }
-  label.slider span { float: right; font-variant-numeric: tabular-nums; color: #c5d0da; }
+  .slider-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 12px 0 4px; }
+  .slider-num { width: 5.2em; box-sizing: border-box; background: transparent; border: 1px solid transparent; color: #c5d0da; font: inherit; font-variant-numeric: tabular-nums; text-align: right; padding: 1px 4px; border-radius: 4px; }
+  .slider-num:hover, .slider-num:focus { border-color: #5a6573; background: #1c1f24; outline: none; }
   input[type="range"] { width: 100%; margin: 0; }
   #busy { color: #d7c27a; min-height: 1.2em; }
   #hint { color: #9aa3ad; font-size: 12px; margin-top: 14px; }
@@ -38,10 +39,10 @@
     <button id="play" type="button">Pause</button>
     <button id="place" type="button">Place</button>
   </div>
-  <label class="slider">time scale <span id="scale-val">1.00</span></label>
+  <div class="slider-head">time scale <input id="scale-val" class="slider-num" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" spellcheck="false" value="1.00" aria-label="time scale value"></div>
   <input id="scale" type="range" min="0" max="4" step="0.05" value="1">
   <div id="sliders"></div>
-  <p id="hint">Drag to orbit. Right-drag or Shift-drag to pan. Scroll to zoom. Place turns the left button / one finger into a ground drag the scene can read. Two fingers orbit while Place is on; pinch zooms; three fingers pan.</p>
+  <p id="hint">Drag to orbit. Right-drag, middle-drag, or Shift-drag to pan. Scroll to zoom. Double middle-click, a still two-finger double-tap, or F recenters on the model. Place turns the left button / one finger into a ground drag the scene can read; two fingers still pan and pinch. Click a number next to a slider to type a value.</p>
 </aside>
 <pre id="error"></pre>
 <script src="viewer.js"></script>
