@@ -40,11 +40,11 @@ The command compiles the scene, serves the viewer on `0.0.0.0`, and prints a loc
 
 The view:
 
-- Drag to orbit. Right-drag, middle-drag, or Shift-drag to pan. The wheel zooms.
-- Touch: one finger orbits, two fingers pan and pinch. Turn on **Place** and one finger drags on the ground instead; two fingers orbit, pinch zooms, three fingers pan.
+- Drag to orbit. Right-drag, middle-drag, or Shift-drag to pan. The wheel zooms. Finger navigation matches Vert_Modeler: one finger orbits, two fingers pan (midpoint) and pinch-zoom. After a pinch, the remaining finger is idle so it does not jump to an orbit. A still two-finger double-tap, a double middle-click, or F recenters on the model.
+- Turn on **Place** and one finger / the left button drags on the ground instead; two fingers still pan and pinch.
 - **Place** reports that ground drag to the scene. The hit is the z = 0 plane.
 - Pause and the time-scale slider are viewer controls. Space pauses when the focus is not in a field.
-- Sliders under those are whatever the scene registered.
+- Sliders under those are whatever the scene registered. Click the number beside a slider (including time scale) to type a value. Enter or clicking away commits, Escape cancels. A typed value may sit outside the slider's range; only the thumb is clamped to the ends.
 
 A reload starts the scene over. For the rest of the browser tab, slider values, time scale, pause, and Place are restored.
 

@@ -34,9 +34,7 @@ struct Gpu {
 
 enum {
     GESTURE_NONE = 0,
-    GESTURE_ORBIT = 1,
-    GESTURE_PAN = 2,
-    GESTURE_PLACE = 3
+    GESTURE_PLACE = 1
 };
 
 static Slider g_slider[ANIM_SLIDER_MAX];
@@ -62,10 +60,8 @@ static double g_last_ms = 0.0;
 
 static Anim_pointer g_pointer;
 static int g_gesture = GESTURE_NONE;
-static int g_fingers = 0;
 static float g_last_x = 0.f;
 static float g_last_y = 0.f;
-static float g_pinch = 0.f;
 
 static int g_view_w = 1;
 static int g_view_h = 1;
@@ -86,11 +82,12 @@ static GLint g_u_line_vp = -1;
 static GLint g_u_line_color = -1;
 
 //----- Camera -----||
+// Orbit, pan, and zoom match Vert_Modeler: yaw -= dx*0.01, pitch += dy*0.01
+// (pitch clamped just short of straight up/down), pan is in the screen plane
+// at the grabbed depth, and zoom is a multiplicative factor.
 
-static void clamp_cam() {
-    if (g_pitch < 0.08f) g_pitch = 0.08f;
-    if (g_pitch > 1.45f) g_pitch = 1.45f;
-    if (g_dist < 0.35f) g_dist = 0.35f;
+static void clamp_dist() {
+    if (g_dist < 0.05f) g_dist = 0.05f;
     if (g_dist > 80.f) g_dist = 80.f;
 }
 
@@ -113,17 +110,123 @@ static void camera_basis(Vec3 *right, Vec3 *up, Vec3 *fwd) {
 }
 
 static void orbit(float dx, float dy) {
-    g_yaw -= dx * 0.007f;
-    g_pitch -= dy * 0.007f;
-    clamp_cam();
+    g_yaw -= dx * 0.01f;
+    g_pitch += dy * 0.01f;
+    if (g_pitch < -1.55f) g_pitch = -1.55f;
+    if (g_pitch > 1.55f) g_pitch = 1.55f;
 }
 
-static void pan(float dx, float dy) {
+static void pan(float dx, float dy, float depth) {
+    if (!(depth > 0.0005f)) depth = g_dist;
+    if (depth < 0.0005f) depth = 0.0005f;
     Vec3 s, u;
     camera_basis(&s, &u, 0);
-    float k = g_dist * 0.0016f;
-    g_target = v3_sub(g_target, v3_scale(s, dx * k));
-    g_target = v3_sub(g_target, v3_scale(u, dy * k));
+    double cw = 0, ch = 0;
+    emscripten_get_element_css_size("#canvas", &cw, &ch);
+    if (ch < 1.0) ch = 1.0;
+    float k = (2.f * depth * tanf(g_fovy * 0.5f)) / (float)ch;
+    g_target = v3_add(g_target, v3_scale(s, -dx * k));
+    g_target = v3_add(g_target, v3_scale(u, dy * k));
+}
+
+static void zoom_by(float factor) {
+    if (!(factor > 0.f) || !isfinite(factor)) return;
+    g_dist *= factor;
+    clamp_dist();
+}
+
+static Vec3 draw_vert_world(const Draw &d, int i) {
+    const Vert &v = d.verts[i];
+    float s = d.scale;
+    Vec3 local = v3(d.offset.x + ((float)v.pos[0] / 32767.f) * s,
+                    d.offset.y + ((float)v.pos[1] / 32767.f) * s,
+                    d.offset.z + ((float)v.pos[2] / 32767.f) * s);
+    return xf_point(d.xf, local);
+}
+
+static void recenter() {
+    Vec3 lo = v3(1e30f, 1e30f, 1e30f);
+    Vec3 hi = v3(-1e30f, -1e30f, -1e30f);
+    int any = 0;
+    for (int i = 0; i < g_draw_n; i++) {
+        const Draw &d = g_draw[i];
+        if (!d.verts || d.count <= 0) continue;
+        for (int k = 0; k < d.count; k++) {
+            Vec3 p = draw_vert_world(d, k);
+            if (p.x < lo.x) lo.x = p.x;
+            if (p.y < lo.y) lo.y = p.y;
+            if (p.z < lo.z) lo.z = p.z;
+            if (p.x > hi.x) hi.x = p.x;
+            if (p.y > hi.y) hi.y = p.y;
+            if (p.z > hi.z) hi.z = p.z;
+            any = 1;
+        }
+    }
+    if (!any) {
+        g_target = v3(0.f, 0.f, 0.4f);
+        return;
+    }
+    g_target = v3((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f);
+}
+
+static int ray_tri(Vec3 orig, Vec3 dir, Vec3 v0, Vec3 v1, Vec3 v2, float *t_out) {
+    Vec3 e1 = v3_sub(v1, v0);
+    Vec3 e2 = v3_sub(v2, v0);
+    Vec3 pvec = v3_cross(dir, e2);
+    float det = v3_dot(e1, pvec);
+    if (fabsf(det) < 1e-8f) return 0;
+    float inv = 1.f / det;
+    Vec3 tvec = v3_sub(orig, v0);
+    float u = v3_dot(tvec, pvec) * inv;
+    if (u < 0.f || u > 1.f) return 0;
+    Vec3 qvec = v3_cross(tvec, e1);
+    float v = v3_dot(dir, qvec) * inv;
+    if (v < 0.f || u + v > 1.f) return 0;
+    float t = v3_dot(e2, qvec) * inv;
+    if (t <= 1e-5f) return 0;
+    *t_out = t;
+    return 1;
+}
+
+static int screen_ray(float px, float py, Vec3 *origin, Vec3 *dir, Vec3 *fwd) {
+    double cw = 0, ch = 0;
+    emscripten_get_element_css_size("#canvas", &cw, &ch);
+    if (cw < 1.0 || ch < 1.0) return 0;
+    float ndc_x = (float)((px / cw) * 2.0 - 1.0);
+    float ndc_y = (float)(1.0 - (py / ch) * 2.0);
+    float aspect = (float)(cw / ch);
+    float tan_h = tanf(g_fovy * 0.5f);
+    Vec3 eye = camera_eye();
+    Vec3 s, u, f;
+    camera_basis(&s, &u, &f);
+    Vec3 d = v3_norm(v3_add(v3_add(v3_scale(s, ndc_x * aspect * tan_h), v3_scale(u, ndc_y * tan_h)), f));
+    *origin = eye;
+    *dir = d;
+    if (fwd) *fwd = f;
+    return 1;
+}
+
+// Depth along the view axis of the model under a screen point, or the orbit
+// distance if the ray misses. Same rule as Vert_Modeler.
+static float grab_depth(float px, float py) {
+    Vec3 origin, dir, fwd;
+    if (!screen_ray(px, py, &origin, &dir, &fwd)) return g_dist;
+    float best = 1e30f;
+    for (int i = 0; i < g_draw_n; i++) {
+        const Draw &d = g_draw[i];
+        if (!d.verts) continue;
+        for (int k = 0; k + 2 < d.count; k += 3) {
+            float t = 0.f;
+            if (ray_tri(origin, dir, draw_vert_world(d, k), draw_vert_world(d, k + 1), draw_vert_world(d, k + 2), &t) && t < best) {
+                best = t;
+            }
+        }
+    }
+    if (best < 1e30f) {
+        float depth = best * v3_dot(dir, fwd);
+        return depth > 0.0005f ? depth : 0.0005f;
+    }
+    return g_dist;
 }
 
 static void mat_mul(const float *a, const float *b, float *o) {
@@ -196,6 +299,8 @@ static void update_hit() {
 }
 
 //----- Pointer -----||
+// Canvas orbit/pan/zoom/pinch live in viewer.js (Pointer Events, same mapping
+// as Vert_Modeler). These hooks only keep the Place-mode ground pick in sync.
 
 static void begin_place() {
     g_gesture = GESTURE_PLACE;
@@ -214,145 +319,10 @@ static void end_place() {
     if (g_gesture == GESTURE_PLACE) g_gesture = GESTURE_NONE;
 }
 
-EM_JS(void, canvas_local, (double client_x, double client_y, float *out_x, float *out_y), {
-    var c = document.getElementById("canvas");
-    if (!c) {
-        setValue(out_x, client_x, "float");
-        setValue(out_y, client_y, "float");
-        return;
-    }
-    var r = c.getBoundingClientRect();
-    setValue(out_x, client_x - r.left, "float");
-    setValue(out_y, client_y - r.top, "float");
-});
-
-static void mouse_canvas(const EmscriptenMouseEvent *e, float *x, float *y) {
-    canvas_local(e->clientX, e->clientY, x, y);
-}
-
-static EM_BOOL on_mouse_down(int, const EmscriptenMouseEvent *e, void *) {
-    mouse_canvas(e, &g_last_x, &g_last_y);
-    update_hit();
-    int pan_btn = (e->button == 1 || e->button == 2 || (e->button == 0 && e->shiftKey));
-    if (pan_btn) g_gesture = GESTURE_PAN;
-    else if (e->button == 0 && g_place) begin_place();
-    else if (e->button == 0) g_gesture = GESTURE_ORBIT;
-    return EM_TRUE;
-}
-
-static EM_BOOL on_mouse_move(int, const EmscriptenMouseEvent *e, void *) {
-    float x = 0.f, y = 0.f;
-    mouse_canvas(e, &x, &y);
-    float dx = x - g_last_x;
-    float dy = y - g_last_y;
+static void pointer_at(float x, float y) {
     g_last_x = x;
     g_last_y = y;
-    if (g_gesture == GESTURE_ORBIT) orbit(dx, dy);
-    else if (g_gesture == GESTURE_PAN) pan(dx, dy);
     update_hit();
-    return EM_FALSE;
-}
-
-static EM_BOOL on_mouse_up(int, const EmscriptenMouseEvent *, void *) {
-    if (g_gesture == GESTURE_PLACE) end_place();
-    g_gesture = GESTURE_NONE;
-    return EM_FALSE;
-}
-
-static EM_BOOL on_wheel(int, const EmscriptenWheelEvent *e, void *) {
-    g_dist *= expf((float)e->deltaY * 0.0011f);
-    clamp_cam();
-    return EM_TRUE;
-}
-
-static int touch_points(const EmscriptenTouchEvent *e, float *xs, float *ys) {
-    int n = 0;
-    int total = e->numTouches;
-    if (total > 8) total = 8;
-    for (int i = 0; i < total; i++) {
-        xs[n] = (float)e->touches[i].targetX;
-        ys[n] = (float)e->touches[i].targetY;
-        n++;
-    }
-    return n;
-}
-
-static float dist2(float ax, float ay, float bx, float by) {
-    float dx = ax - bx;
-    float dy = ay - by;
-    return sqrtf(dx * dx + dy * dy);
-}
-
-static EM_BOOL on_touch(int type, const EmscriptenTouchEvent *e, void *) {
-    float xs[8], ys[8];
-    int n = touch_points(e, xs, ys);
-    if (type == EMSCRIPTEN_EVENT_TOUCHCANCEL) n = 0;
-
-    if (n == 1) {
-        float x = xs[0], y = ys[0];
-        if (g_fingers == 0) {
-            g_last_x = x;
-            g_last_y = y;
-            if (g_place) begin_place();
-            else g_gesture = GESTURE_ORBIT;
-        } else if (g_fingers == 1) {
-            float dx = x - g_last_x;
-            float dy = y - g_last_y;
-            g_last_x = x;
-            g_last_y = y;
-            if (g_gesture == GESTURE_ORBIT) orbit(dx, dy);
-        } else {
-            // Dropped from a multi-touch. Don't start a new placement click.
-            g_last_x = x;
-            g_last_y = y;
-            if (g_pointer.down) end_place();
-            g_gesture = GESTURE_ORBIT;
-        }
-        update_hit();
-    } else if (n >= 2) {
-        if (g_pointer.down) end_place();
-        float cx = 0.f, cy = 0.f;
-        for (int i = 0; i < n; i++) {
-            cx += xs[i];
-            cy += ys[i];
-        }
-        cx /= (float)n;
-        cy /= (float)n;
-        float pinch = dist2(xs[0], ys[0], xs[1], ys[1]);
-        if (g_fingers >= 2) {
-            float dx = cx - g_last_x;
-            float dy = cy - g_last_y;
-            float dp = pinch - g_pinch;
-            if (fabsf(dp) > 1.2f) {
-                g_dist *= expf(-dp * 0.008f);
-                clamp_cam();
-            }
-            if (n >= 3 || !g_place) pan(dx, dy);
-            else orbit(dx, dy);
-        }
-        g_last_x = cx;
-        g_last_y = cy;
-        g_pinch = pinch;
-        g_gesture = GESTURE_NONE;
-    } else if (g_pointer.down) {
-        end_place();
-        g_gesture = GESTURE_NONE;
-    } else {
-        g_gesture = GESTURE_NONE;
-    }
-    g_fingers = n;
-    return EM_TRUE;
-}
-
-static void init_input() {
-    emscripten_set_mousedown_callback("#canvas", 0, 1, on_mouse_down);
-    emscripten_set_mousemove_callback(EMSCRIPTEN_EVENT_TARGET_DOCUMENT, 0, 1, on_mouse_move);
-    emscripten_set_mouseup_callback(EMSCRIPTEN_EVENT_TARGET_DOCUMENT, 0, 1, on_mouse_up);
-    emscripten_set_wheel_callback("#canvas", 0, 1, on_wheel);
-    emscripten_set_touchstart_callback("#canvas", 0, 1, on_touch);
-    emscripten_set_touchmove_callback("#canvas", 0, 1, on_touch);
-    emscripten_set_touchend_callback("#canvas", 0, 1, on_touch);
-    emscripten_set_touchcancel_callback("#canvas", 0, 1, on_touch);
 }
 
 //----- GL -----||
@@ -680,7 +650,6 @@ void anim_start() {
     if (g_started) return;
     g_started = 1;
     if (!init_context()) return;
-    init_input();
     init_gl();
     scene_init();
     g_last_ms = emscripten_get_now();
@@ -712,8 +681,7 @@ EMSCRIPTEN_KEEPALIVE float anim_slider_max(int i) {
 EMSCRIPTEN_KEEPALIVE
 void anim_slider_set(int i, float v) {
     if (i < 0 || i >= g_slider_n || !g_slider[i].value) return;
-    if (v < g_slider[i].minv) v = g_slider[i].minv;
-    if (v > g_slider[i].maxv) v = g_slider[i].maxv;
+    if (!isfinite(v)) return;
     *g_slider[i].value = v;
 }
 
@@ -722,8 +690,7 @@ EMSCRIPTEN_KEEPALIVE int anim_get_playing() { return g_playing; }
 
 EMSCRIPTEN_KEEPALIVE
 void anim_set_time_scale(float s) {
-    if (s < 0.f) s = 0.f;
-    if (s > 8.f) s = 8.f;
+    if (!isfinite(s)) return;
     g_time_scale = s;
 }
 
@@ -737,5 +704,48 @@ void anim_set_place(int on) {
 }
 
 EMSCRIPTEN_KEEPALIVE int anim_get_place() { return g_place; }
+
+EMSCRIPTEN_KEEPALIVE void anim_orbit(float dx, float dy) { orbit(dx, dy); }
+
+EMSCRIPTEN_KEEPALIVE void anim_pan(float dx, float dy, float depth) { pan(dx, dy, depth); }
+
+EMSCRIPTEN_KEEPALIVE void anim_zoom(float factor) { zoom_by(factor); }
+
+EMSCRIPTEN_KEEPALIVE void anim_recenter() { recenter(); }
+
+EMSCRIPTEN_KEEPALIVE float anim_cam_dist() { return g_dist; }
+
+EMSCRIPTEN_KEEPALIVE float anim_cam_yaw() { return g_yaw; }
+
+EMSCRIPTEN_KEEPALIVE float anim_cam_pitch() { return g_pitch; }
+
+EMSCRIPTEN_KEEPALIVE float anim_cam_tx() { return g_target.x; }
+
+EMSCRIPTEN_KEEPALIVE float anim_cam_ty() { return g_target.y; }
+
+EMSCRIPTEN_KEEPALIVE float anim_cam_tz() { return g_target.z; }
+
+EMSCRIPTEN_KEEPALIVE float anim_grab_depth(float x, float y) { return grab_depth(x, y); }
+
+EMSCRIPTEN_KEEPALIVE
+void anim_pointer_at(float x, float y) {
+    pointer_at(x, y);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void anim_place_begin(float x, float y) {
+    pointer_at(x, y);
+    begin_place();
+}
+
+EMSCRIPTEN_KEEPALIVE
+void anim_place_move(float x, float y) {
+    pointer_at(x, y);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void anim_place_end() {
+    end_place();
+}
 
 }
