@@ -463,6 +463,22 @@ static void push_line(float *buf, int *n, int cap, float x0, float y0, float z0,
     *n += 6;
 }
 
+static bool init_context() {
+    EmscriptenWebGLContextAttributes attrs;
+    emscripten_webgl_init_context_attributes(&attrs);
+    attrs.majorVersion = 2;
+    attrs.minorVersion = 0;
+    attrs.antialias = EM_TRUE;
+    attrs.depth = EM_TRUE;
+    EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ctx = emscripten_webgl_create_context("#canvas", &attrs);
+    if (ctx <= 0) {
+        EM_ASM({ throw new Error("WebGL2 is not available in this browser (context error " + $0 + ")"); }, (int)ctx);
+        return false;
+    }
+    emscripten_webgl_make_context_current(ctx);
+    return true;
+}
+
 static void init_gl() {
     g_prog = link_program(MESH_VS, MESH_FS);
     g_line_prog = link_program(LINE_VS, LINE_FS);
@@ -663,6 +679,7 @@ EMSCRIPTEN_KEEPALIVE
 void anim_start() {
     if (g_started) return;
     g_started = 1;
+    if (!init_context()) return;
     init_input();
     init_gl();
     scene_init();
