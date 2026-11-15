@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Shading</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1c1f24; color: #e7e4de; font: 14px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hud { position: fixed; left: 14px; bottom: 14px; display: flex; gap: 10px; align-items: center; }
+  button { background: #3a4250; color: inherit; border: 0; border-radius: 6px; padding: 7px 12px; font: inherit; cursor: pointer; }
+  button.on { background: #3d6b8a; }
+  button:focus-visible { outline: 2px solid #d7c27a; outline-offset: 2px; }
+  #hint { color: #9aa3ad; font-size: 12px; }
+  #error { display: none; position: fixed; left: 14px; right: 14px; top: 14px; margin: 0; padding: 10px 12px;
+           background: #3a1618; color: #ffd4d4; font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; border-radius: 8px; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud">
+  <button id="mode" type="button" aria-pressed="true">Gradient</button>
+  <span id="hint">G cycles</span>
+</div>
+<pre id="error"></pre>
+<script>
+//----- Gradient shading -----||
+// Flat shading paints a whole triangle with one Lambert term,
+// facing = max(dot(N, L), 0). Gradient shading keeps that term and varies
+// it across the face. The mesh is the same as flat shading: position, one
+// normal shared by the three corners, and color. Triangles are not indexed.
+//
+// Barycentrics come from gl_VertexID % 3 and are interpolated. t is the
+// distance from the centroid in that space, scaled so a vertex is 1 and an
+// edge midpoint is 0.5. The world offset from the centroid is rebuilt from
+// dFdx and dFdy of the barycentrics and the world position, so neither the
+// centre nor the slope is stored on the mesh.
+//
+// Lplane = L - N * dot(N, L) lies in the face. grazing = length(Lplane) is
+// the sine of the angle between the normal and the light: 0 facing it, 1
+// edge-on. s is the offset from the centroid along Lplane, divided by the
+// triangle's extent in that direction: -1 on the side away from the light,
+// +1 on the side toward it.
+//
+//   peak = 1 - 0.55 * t
+//   ramp = clamp(facing * mix(1, peak, 1 - grazing) + s * grazing * 0.65, 0, 1)
+//   rgb  = color * (vec3(0.46, 0.46, 0.50) + vec3(0.54, 0.52, 0.46) * ramp)
+//
+// The centroid stays at the flat Lambert value. Facing the light, grazing is
+// near 0, so the vertices fall off and the centre stays bright. The more the
+// face turns away, the larger the slope term, and the more the brightness
+// changes across the triangle. Flat mode is the same formula with ramp = facing.
+//
+//----- Edge highlight -----||
+// Edge highlight starts from that flat colour. Both triangles of a face share
+// one quad UV in 0..1, so the edge distance is computed once per face:
+//   d = min(u, 1-u, v, 1-v)
+// d / fwidth(d) is the distance in pixels. smoothstep feathers a band EDGE_PX
+// wide, and the colour mixes toward white by EDGE_MIX. The shared diagonal is
+// inside the quad, so it is not an edge and does not light.
+//
+//----- Outline -----||
+// Outline uses the same face UV. Each of the four sides has the outward normal
+// of the neighbouring face. dot(neighbour, toCamera) <= 0 means that neighbour
+// is back-facing, so the side is a silhouette and is drawn dark and thicker.
+// A front-facing neighbour is an internal edge and is drawn bright and thin.
+// The base colour is the flat Lambert term. The diagonal is not a UV edge.
+
+//----- Mesh -----||
+// Unit cube, centred, Z up. 12 triangles, 36 vertices. The same face normal
+// is written on all three corners. uv is a 0..1 quad coordinate shared by
+// both triangles of a face. Each corner also stores the four neighbour
+// normals across u = 0, u = 1, v = 0, and v = 1.
+
+const ALBEDO = [0.82, 0.78, 0.70];
+
+function buildCube() {
+  const H = 0.5;
+  const pos = [];
+  const nrm = [];
+  const col = [];
+  const uv = [];
+  const nn = [];
+  const PX = [1, 0, 0], NX = [-1, 0, 0], PY = [0, 1, 0], NY = [0, -1, 0], PZ = [0, 0, 1], NZ = [0, 0, -1];
+  function tri(nx, ny, nz, e0, e1, e2, e3, a, b, c) {
+    pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+    nrm.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+    col.push(ALBEDO[0], ALBEDO[1], ALBEDO[2], ALBEDO[0], ALBEDO[1], ALBEDO[2], ALBEDO[0], ALBEDO[1], ALBEDO[2]);
+    uv.push(a[3], a[4], b[3], b[4], c[3], c[4]);
+    for (let k = 0; k < 3; k++) nn.push(e0[0], e0[1], e0[2], e1[0], e1[1], e1[2], e2[0], e2[1], e2[2], e3[0], e3[1], e3[2]);
+  }
+  // Each corner is x, y, z, u, v. Neighbours are across u=0, u=1, v=0, v=1.
+  // +Z
+  tri(0, 0, 1, NX, PX, NY, PY,  [-H, -H, H, 0, 0],  [H, -H, H, 1, 0],  [H, H, H, 1, 1]);
+  tri(0, 0, 1, NX, PX, NY, PY,  [-H, -H, H, 0, 0],  [H, H, H, 1, 1],  [-H, H, H, 0, 1]);
+  // -Z
+  tri(0, 0, -1, NX, PX, NY, PY,  [-H, -H, -H, 0, 0],  [H, H, -H, 1, 1],  [H, -H, -H, 1, 0]);
+  tri(0, 0, -1, NX, PX, NY, PY,  [-H, -H, -H, 0, 0],  [-H, H, -H, 0, 1],  [H, H, -H, 1, 1]);
+  // +Y
+  tri(0, 1, 0, NX, PX, NZ, PZ,  [-H, H, -H, 0, 0],  [H, H, H, 1, 1],  [H, H, -H, 1, 0]);
+  tri(0, 1, 0, NX, PX, NZ, PZ,  [-H, H, -H, 0, 0],  [-H, H, H, 0, 1],  [H, H, H, 1, 1]);
+  // -Y
+  tri(0, -1, 0, NX, PX, NZ, PZ,  [-H, -H, -H, 0, 0],  [H, -H, -H, 1, 0],  [H, -H, H, 1, 1]);
+  tri(0, -1, 0, NX, PX, NZ, PZ,  [-H, -H, -H, 0, 0],  [H, -H, H, 1, 1],  [-H, -H, H, 0, 1]);
+  // +X
+  tri(1, 0, 0, NY, PY, NZ, PZ,  [H, -H, -H, 0, 0],  [H, H, -H, 1, 0],  [H, H, H, 1, 1]);
+  tri(1, 0, 0, NY, PY, NZ, PZ,  [H, -H, -H, 0, 0],  [H, H, H, 1, 1],  [H, -H, H, 0, 1]);
+  // -X
+  tri(-1, 0, 0, NY, PY, NZ, PZ,  [-H, -H, -H, 0, 0],  [-H, -H, H, 0, 1],  [-H, H, H, 1, 1]);
+  tri(-1, 0, 0, NY, PY, NZ, PZ,  [-H, -H, -H, 0, 0],  [-H, H, H, 1, 1],  [-H, H, -H, 1, 0]);
+  return {
+    pos: new Float32Array(pos),
+    nrm: new Float32Array(nrm),
+    col: new Float32Array(col),
+    uv: new Float32Array(uv),
+    nn: new Float32Array(nn),
+    count: pos.length / 3,
+  };
+}
+
+//----- Shaders -----||
+
+const VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNrm;
+layout(location = 2) in vec3 aCol;
+layout(location = 3) in vec2 aUV;
+layout(location = 4) in vec3 aN0;
+layout(location = 5) in vec3 aN1;
+layout(location = 6) in vec3 aN2;
+layout(location = 7) in vec3 aN3;
+uniform mat4 uViewProj;
+uniform mat4 uModel;
+out vec3 vWorld;
+flat out vec3 vN;
+out vec3 vCol;
+out vec3 vBary;
+out vec2 vUV;
+flat out vec3 vE0;
+flat out vec3 vE1;
+flat out vec3 vE2;
+flat out vec3 vE3;
+void main() {
+  vec4 world = uModel * vec4(aPos, 1.0);
+  vWorld = world.xyz;
+  gl_Position = uViewProj * world;
+  mat3 rot = mat3(uModel);
+  vN = rot * aNrm;
+  vE0 = rot * aN0;
+  vE1 = rot * aN1;
+  vE2 = rot * aN2;
+  vE3 = rot * aN3;
+  vCol = aCol;
+  vUV = aUV;
+  vec3 bary = vec3(0.0);
+  int corner = gl_VertexID % 3;
+  if (corner == 0) bary.x = 1.0;
+  else if (corner == 1) bary.y = 1.0;
+  else bary.z = 1.0;
+  vBary = bary;
+}
+`;
+
+const FS = `#version 300 es
+precision highp float;
+in vec3 vWorld;
+flat in vec3 vN;
+in vec3 vCol;
+in vec3 vBary;
+in vec2 vUV;
+flat in vec3 vE0;
+flat in vec3 vE1;
+flat in vec3 vE2;
+flat in vec3 vE3;
+uniform vec3 uLight;
+uniform vec3 uCam;
+uniform float uMode;
+out vec4 frag;
+
+//----- Edge highlight -----||
+// Band width in pixels, and how far a fully lit edge mixes toward white.
+const float EDGE_PX = 2.0;
+const float EDGE_MIX = 0.25;
+
+//----- Outline -----||
+// Internal creases are thin and light. Silhouette lines are darker and thicker.
+const float OUTLINE_INNER_PX = 1.6;
+const float OUTLINE_SIL_PX = 3.0;
+const vec3 OUTLINE_INNER_COL = vec3(0.94, 0.97, 1.0);
+const vec3 OUTLINE_SIL_COL = vec3(0.05, 0.06, 0.08);
+
+// Offset of this fragment from the centroid, plus the three vertex offsets.
+// Derivatives are computed in main so they stay in uniform control flow.
+void faceFrame(vec3 bary, vec3 dbx, vec3 dby, vec3 dpx, vec3 dpy, out vec3 fromCenter, out vec3 c0, out vec3 c1, out vec3 c2) {
+  float d01 = abs(dbx.x * dby.y - dbx.y * dby.x);
+  float d02 = abs(dbx.x * dby.z - dbx.z * dby.x);
+  float d12 = abs(dbx.y * dby.z - dbx.z * dby.y);
+  float u, v, dudx, dvdx, dudy, dvdy;
+  if (d01 >= d02 && d01 >= d12) {
+    u = bary.x; v = bary.y;
+    dudx = dbx.x; dvdx = dbx.y; dudy = dby.x; dvdy = dby.y;
+  } else if (d02 >= d12) {
+    u = bary.x; v = bary.z;
+    dudx = dbx.x; dvdx = dbx.z; dudy = dby.x; dvdy = dby.z;
+  } else {
+    u = bary.y; v = bary.z;
+    dudx = dbx.y; dvdx = dbx.z; dudy = dby.y; dvdy = dby.z;
+  }
+  float det = dudx * dvdy - dvdx * dudy;
+  if (abs(det) < 1e-8) {
+    fromCenter = vec3(0.0);
+    c0 = vec3(0.0);
+    c1 = vec3(0.0);
+    c2 = vec3(0.0);
+    return;
+  }
+  vec3 Eu = (dvdy * dpx - dvdx * dpy) / det;
+  vec3 Ev = (dudx * dpy - dudy * dpx) / det;
+  fromCenter = (u - 1.0 / 3.0) * Eu + (v - 1.0 / 3.0) * Ev;
+  c0 = (2.0 / 3.0) * Eu - (1.0 / 3.0) * Ev;
+  c1 = (-1.0 / 3.0) * Eu + (2.0 / 3.0) * Ev;
+  c2 = (-1.0 / 3.0) * Eu - (1.0 / 3.0) * Ev;
+}
+
+void main() {
+  vec3 N = normalize(vN);
+  vec3 L = normalize(uLight);
+  float ndotl = dot(N, L);
+  float facing = max(ndotl, 0.0);
+  //----- Ramp -----||
+  // peak = 1 - 0.55 * t
+  // ramp = clamp(facing * mix(1, peak, 1 - grazing) + s * grazing * 0.65, 0, 1)
+  float ramp = facing;
+  vec3 dbx = dFdx(vBary);
+  vec3 dby = dFdy(vBary);
+  vec3 dpx = dFdx(vWorld);
+  vec3 dpy = dFdy(vWorld);
+  if (uMode > 0.5 && uMode < 1.5) {
+    vec3 Lplane = L - N * ndotl;
+    float grazing = length(Lplane);
+    float t = clamp(length(vBary - vec3(1.0 / 3.0)) * inversesqrt(2.0 / 3.0), 0.0, 1.0);
+    float s = 0.0;
+    if (grazing > 1e-4) {
+      vec3 fromCenter, c0, c1, c2;
+      faceFrame(vBary, dbx, dby, dpx, dpy, fromCenter, c0, c1, c2);
+      vec3 slopeDir = Lplane / grazing;
+      float extent = max(abs(dot(c0, slopeDir)), max(abs(dot(c1, slopeDir)), abs(dot(c2, slopeDir))));
+      if (extent > 1e-6) {
+        float raw = dot(fromCenter, slopeDir) / extent;
+        if (raw == raw) s = clamp(raw, -1.0, 1.0);
+      }
+    }
+    float peak = 1.0 - 0.55 * t;
+    ramp = clamp(facing * mix(1.0, peak, 1.0 - grazing) + s * grazing * 0.65, 0.0, 1.0);
+  }
+  vec3 rgb = vCol * (vec3(0.46, 0.46, 0.50) + vec3(0.54, 0.52, 0.46) * ramp);
+  //----- Edge band -----||
+  // Pixel distance to each side of the face quad. The diagonal is not a side.
+  float fwU = max(fwidth(vUV.x), 1e-5);
+  float fwV = max(fwidth(vUV.y), 1e-5);
+  float pxU0 = vUV.x / fwU;
+  float pxU1 = (1.0 - vUV.x) / fwU;
+  float pxV0 = vUV.y / fwV;
+  float pxV1 = (1.0 - vUV.y) / fwV;
+  if (uMode > 1.5 && uMode < 2.5) {
+    float edgePx = min(min(pxU0, pxU1), min(pxV0, pxV1));
+    float edgeBand = 1.0 - smoothstep(EDGE_PX, EDGE_PX + 1.5, edgePx);
+    rgb = clamp(mix(rgb, vec3(1.0), edgeBand * EDGE_MIX), 0.0, 1.0);
+  }
+  if (uMode > 2.5) {
+    vec3 toCam = normalize(uCam - vWorld);
+    float innerBand = 0.0;
+    float silBand = 0.0;
+    vec3 neigh[4];
+    float px[4];
+    neigh[0] = vE0; px[0] = pxU0;
+    neigh[1] = vE1; px[1] = pxU1;
+    neigh[2] = vE2; px[2] = pxV0;
+    neigh[3] = vE3; px[3] = pxV1;
+    for (int i = 0; i < 4; i++) {
+      float side = dot(normalize(neigh[i]), toCam);
+      float width = side <= 0.0 ? OUTLINE_SIL_PX : OUTLINE_INNER_PX;
+      float band = 1.0 - smoothstep(width, width + 1.25, px[i]);
+      if (side <= 0.0) silBand = max(silBand, band);
+      else innerBand = max(innerBand, band);
+    }
+    rgb = mix(rgb, OUTLINE_INNER_COL, innerBand);
+    rgb = mix(rgb, OUTLINE_SIL_COL, silBand);
+  }
+  frag = vec4(rgb, 1.0);
+}
+`;
+
+//----- Draw -----||
+
+const LIGHT = [0.28, 0.16, 0.95];
+const EYE = [2.05, -2.75, 1.72];
+const canvas = document.getElementById("view");
+const errorBox = document.getElementById("error");
+const modeButton = document.getElementById("mode");
+
+// Live view state. The draw loop reads it.
+const MODE_NAMES = ["Flat", "Gradient", "Edge highlight", "Outline"];
+const demo = {
+  mode: 1,
+  angle: 0.55,
+  freeze: false,
+  ready: false,
+};
+window.__demo = demo;
+
+function fail(msg) {
+  demo.ready = false;
+  errorBox.style.display = "block";
+  errorBox.textContent = msg;
+  console.error(msg);
+}
+
+function compile(gl, type, src) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, src);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(shader) || "compile failed";
+    const name = type === gl.VERTEX_SHADER ? "vertex shader" : "fragment shader";
+    fail(name + ":\n" + log);
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function link(gl, vs, fs) {
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    fail("link:\n" + (gl.getProgramInfoLog(program) || "link failed"));
+    gl.deleteProgram(program);
+    return null;
+  }
+  return program;
+}
+
+function mat4Multiply(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      o[c * 4 + r] =
+        a[r] * b[c * 4] +
+        a[4 + r] * b[c * 4 + 1] +
+        a[8 + r] * b[c * 4 + 2] +
+        a[12 + r] * b[c * 4 + 3];
+    }
+  }
+  return o;
+}
+
+function mat4Perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2);
+  const nf = 1 / (near - far);
+  const o = new Float32Array(16);
+  o[0] = f / aspect;
+  o[5] = f;
+  o[10] = (far + near) * nf;
+  o[11] = -1;
+  o[14] = 2 * far * near * nf;
+  return o;
+}
+
+function mat4LookAt(eye, center, up) {
+  let zx = eye[0] - center[0];
+  let zy = eye[1] - center[1];
+  let zz = eye[2] - center[2];
+  let len = Math.hypot(zx, zy, zz);
+  zx /= len; zy /= len; zz /= len;
+  let xx = up[1] * zz - up[2] * zy;
+  let xy = up[2] * zx - up[0] * zz;
+  let xz = up[0] * zy - up[1] * zx;
+  len = Math.hypot(xx, xy, xz);
+  xx /= len; xy /= len; xz /= len;
+  const yx = zy * xz - zz * xy;
+  const yy = zz * xx - zx * xz;
+  const yz = zx * xy - zy * xx;
+  const o = new Float32Array(16);
+  o[0] = xx; o[1] = yx; o[2] = zx;
+  o[4] = xy; o[5] = yy; o[6] = zy;
+  o[8] = xz; o[9] = yz; o[10] = zz;
+  o[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
+  o[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+  o[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
+  o[15] = 1;
+  return o;
+}
+
+function mat4RotateZ(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const o = new Float32Array(16);
+  o[0] = c; o[1] = s;
+  o[4] = -s; o[5] = c;
+  o[10] = 1;
+  o[15] = 1;
+  return o;
+}
+
+const gl = canvas.getContext("webgl2", {
+  alpha: false,
+  antialias: true,
+  depth: true,
+  preserveDrawingBuffer: true,
+});
+if (!gl) fail("WebGL2 is not available");
+
+let program = null;
+let mesh = null;
+let uViewProj = null;
+let uModel = null;
+let uLight = null;
+let uCam = null;
+let uMode = null;
+
+if (gl) {
+  const vs = compile(gl, gl.VERTEX_SHADER, VS);
+  const fs = vs && compile(gl, gl.FRAGMENT_SHADER, FS);
+  program = vs && fs && link(gl, vs, fs);
+  if (program) {
+    uViewProj = gl.getUniformLocation(program, "uViewProj");
+    uModel = gl.getUniformLocation(program, "uModel");
+    uLight = gl.getUniformLocation(program, "uLight");
+    uCam = gl.getUniformLocation(program, "uCam");
+    uMode = gl.getUniformLocation(program, "uMode");
+    mesh = buildCube();
+    const buffer = gl.createBuffer();
+    const strideFloats = 23;
+    const packed = new Float32Array(mesh.count * strideFloats);
+    for (let i = 0; i < mesh.count; i++) {
+      packed.set(mesh.pos.subarray(i * 3, i * 3 + 3), i * strideFloats);
+      packed.set(mesh.nrm.subarray(i * 3, i * 3 + 3), i * strideFloats + 3);
+      packed.set(mesh.col.subarray(i * 3, i * 3 + 3), i * strideFloats + 6);
+      packed.set(mesh.uv.subarray(i * 2, i * 2 + 2), i * strideFloats + 9);
+      packed.set(mesh.nn.subarray(i * 12, i * 12 + 12), i * strideFloats + 11);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, packed, gl.STATIC_DRAW);
+    const stride = strideFloats * 4;
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, 24);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 36);
+    gl.enableVertexAttribArray(4);
+    gl.vertexAttribPointer(4, 3, gl.FLOAT, false, stride, 44);
+    gl.enableVertexAttribArray(5);
+    gl.vertexAttribPointer(5, 3, gl.FLOAT, false, stride, 56);
+    gl.enableVertexAttribArray(6);
+    gl.vertexAttribPointer(6, 3, gl.FLOAT, false, stride, 68);
+    gl.enableVertexAttribArray(7);
+    gl.vertexAttribPointer(7, 3, gl.FLOAT, false, stride, 80);
+    gl.enable(gl.DEPTH_TEST);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.frontFace(gl.CCW);
+    demo.ready = true;
+  }
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+}
+
+function draw() {
+  if (!demo.ready) return;
+  resize();
+  const w = canvas.width;
+  const h = canvas.height;
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0.110, 0.122, 0.141, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  const aspect = w / h;
+  const view = mat4LookAt(EYE, [0, 0, 0], [0, 0, 1]);
+  const proj = mat4Perspective(38 * Math.PI / 180, aspect, 0.1, 40);
+  const viewProj = mat4Multiply(proj, view);
+  const model = mat4RotateZ(demo.angle);
+  gl.useProgram(program);
+  gl.uniformMatrix4fv(uViewProj, false, viewProj);
+  gl.uniformMatrix4fv(uModel, false, model);
+  gl.uniform3fv(uLight, LIGHT);
+  gl.uniform3fv(uCam, EYE);
+  gl.uniform1f(uMode, demo.mode);
+  gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+  if (!draw.checked) {
+    draw.checked = true;
+    const err = gl.getError();
+    if (err !== 0) fail("gl error " + err);
+  }
+}
+
+function applyMode() {
+  modeButton.textContent = MODE_NAMES[demo.mode];
+  modeButton.classList.toggle("on", demo.mode !== 0);
+  modeButton.setAttribute("aria-label", "Shading: " + MODE_NAMES[demo.mode]);
+}
+
+function cycleMode() {
+  demo.mode = (demo.mode + 1) % MODE_NAMES.length;
+  applyMode();
+}
+
+//----- Input -----||
+
+modeButton.addEventListener("click", cycleMode);
+window.addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  if (e.key === "g" || e.key === "G") cycleMode();
+});
+
+let lastTime = 0;
+function tick(now) {
+  const dt = lastTime ? Math.min(0.05, (now - lastTime) / 1000) : 0;
+  lastTime = now;
+  if (!demo.freeze) demo.angle += dt * 0.28;
+  draw();
+  requestAnimationFrame(tick);
+}
+
+if (demo.ready) requestAnimationFrame(tick);
+</script>
+</body>
+</html>
