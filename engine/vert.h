@@ -2,9 +2,12 @@
 //----- Vert -----||
 // Packed vertex shared with exported model headers. 12 bytes, stride 12, no padding.
 // 3 verts per triangle, CCW seen from outside. Z is up.
-//   pos  int16x3 @0, normalized: -32767..32767 maps to -1..1
-//   nrm  int8x2 octahedral @6, normalized, unit normal (outward)
-//   rgba uint8x4 @8 (alpha is 255)
+//   pos   int16x3 @0, normalized: -32767..32767 maps to -1..1
+//   nrm   int8x2 octahedral @6, normalized, unit normal (outward)
+//   color uint16 palette color index @8
+//   spare uint8x2 @10, reserved, zero
+// color indexes the unlit RGB table from palettes.h (engine/anim_palette.h).
+// The viewer shades that RGB from the normal. Nothing about the light is baked in.
 // A header also ships name_offset[3] and name_scale. With a part pivot transform P:
 //   local = offset + (pos / 32767) * scale
 //   world = P * local
@@ -17,13 +20,15 @@
 struct Vert {
     int16_t pos[3];
     int8_t nrm[2];
-    uint8_t rgba[4];
+    uint16_t color;
+    uint8_t spare[2];
 };
 
 static_assert(sizeof(Vert) == 12, "Vert is 12 bytes");
 static_assert(offsetof(Vert, pos) == 0, "pos at 0");
 static_assert(offsetof(Vert, nrm) == 6, "nrm at 6");
-static_assert(offsetof(Vert, rgba) == 8, "rgba at 8");
+static_assert(offsetof(Vert, color) == 8, "color at 8");
+static_assert(offsetof(Vert, spare) == 10, "spare at 10");
 
 //----- Octahedral normal -----||
 // Matches the usual octahedral encode: project onto the L1 octahedron, fold the

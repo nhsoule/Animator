@@ -14,7 +14,7 @@ enum { ANIM_SCRATCH_MAX = 8192 };
 struct Anim_scratch {
     float pos[ANIM_SCRATCH_MAX * 3];
     float nrm[ANIM_SCRATCH_MAX * 3];
-    uint8_t col[ANIM_SCRATCH_MAX * 4];
+    uint16_t color[ANIM_SCRATCH_MAX];
     int count;
 };
 
@@ -36,7 +36,8 @@ inline void anim_mesh_view(Anim_mesh &m, const Vert *verts, int count, const flo
     m.rev = 0;
 }
 
-inline void anim_tri(Anim_scratch &s, Vec3 a, Vec3 b, Vec3 c, uint8_t r, uint8_t g, uint8_t b8) {
+// color is a palette index (Vert::color), not a channel.
+inline void anim_tri(Anim_scratch &s, Vec3 a, Vec3 b, Vec3 c, uint16_t color) {
     if (s.count + 3 > ANIM_SCRATCH_MAX) return;
     Vec3 n = v3_cross(v3_sub(b, a), v3_sub(c, a));
     if (v3_len2(n) < 1e-12f) return;
@@ -50,14 +51,11 @@ inline void anim_tri(Anim_scratch &s, Vec3 a, Vec3 b, Vec3 c, uint8_t r, uint8_t
         s.nrm[k * 3 + 0] = n.x;
         s.nrm[k * 3 + 1] = n.y;
         s.nrm[k * 3 + 2] = n.z;
-        s.col[k * 4 + 0] = r;
-        s.col[k * 4 + 1] = g;
-        s.col[k * 4 + 2] = b8;
-        s.col[k * 4 + 3] = 255;
+        s.color[k] = color;
     }
 }
 
-inline void anim_box(Anim_scratch &s, Vec3 center, Vec3 size, uint8_t r, uint8_t g, uint8_t b) {
+inline void anim_box(Anim_scratch &s, Vec3 center, Vec3 size, uint16_t color) {
     Vec3 h = v3_scale(size, 0.5f);
     Vec3 p[8];
     for (int i = 0; i < 8; i++) {
@@ -67,23 +65,23 @@ inline void anim_box(Anim_scratch &s, Vec3 center, Vec3 size, uint8_t r, uint8_t
         p[i] = v3_add(center, v3(sx, sy, sz));
     }
     // bit 0 = +x, bit 1 = +y, bit 2 = +z. CCW from the outside.
-    anim_tri(s, p[4], p[5], p[7], r, g, b);
-    anim_tri(s, p[4], p[7], p[6], r, g, b);
-    anim_tri(s, p[0], p[3], p[1], r, g, b);
-    anim_tri(s, p[0], p[2], p[3], r, g, b);
-    anim_tri(s, p[2], p[7], p[3], r, g, b);
-    anim_tri(s, p[2], p[6], p[7], r, g, b);
-    anim_tri(s, p[0], p[1], p[5], r, g, b);
-    anim_tri(s, p[0], p[5], p[4], r, g, b);
-    anim_tri(s, p[1], p[3], p[7], r, g, b);
-    anim_tri(s, p[1], p[7], p[5], r, g, b);
-    anim_tri(s, p[0], p[4], p[6], r, g, b);
-    anim_tri(s, p[0], p[6], p[2], r, g, b);
+    anim_tri(s, p[4], p[5], p[7], color);
+    anim_tri(s, p[4], p[7], p[6], color);
+    anim_tri(s, p[0], p[3], p[1], color);
+    anim_tri(s, p[0], p[2], p[3], color);
+    anim_tri(s, p[2], p[7], p[3], color);
+    anim_tri(s, p[2], p[6], p[7], color);
+    anim_tri(s, p[0], p[1], p[5], color);
+    anim_tri(s, p[0], p[5], p[4], color);
+    anim_tri(s, p[1], p[3], p[7], color);
+    anim_tri(s, p[1], p[7], p[5], color);
+    anim_tri(s, p[0], p[4], p[6], color);
+    anim_tri(s, p[0], p[6], p[2], color);
 }
 
 // Cylinder along +Z. radius in XY, from z0 to z1. sides clamped to 3..12.
 inline void anim_cylinder_z(Anim_scratch &s, float z0, float z1, float radius, int sides,
-                            uint8_t r, uint8_t g, uint8_t b, int caps) {
+                            uint16_t color, int caps) {
     if (sides < 3) sides = 3;
     if (sides > 12) sides = 12;
     Vec3 bot[12], top[12];
@@ -96,22 +94,22 @@ inline void anim_cylinder_z(Anim_scratch &s, float z0, float z1, float radius, i
     }
     for (int i = 0; i < sides; i++) {
         int j = (i + 1) % sides;
-        anim_tri(s, bot[i], top[j], top[i], r, g, b);
-        anim_tri(s, bot[i], bot[j], top[j], r, g, b);
+        anim_tri(s, bot[i], top[j], top[i], color);
+        anim_tri(s, bot[i], bot[j], top[j], color);
     }
     if (!caps) return;
     Vec3 cb = v3(0.f, 0.f, z0);
     Vec3 ct = v3(0.f, 0.f, z1);
     for (int i = 0; i < sides; i++) {
         int j = (i + 1) % sides;
-        anim_tri(s, top[i], top[j], ct, r, g, b);
-        anim_tri(s, bot[i], cb, bot[j], r, g, b);
+        anim_tri(s, top[i], top[j], ct, color);
+        anim_tri(s, bot[i], cb, bot[j], color);
     }
 }
 
 // Tube along a polyline. No caps. sides clamped to 3..8. CCW outward.
 inline void anim_tube(Anim_scratch &s, const Vec3 *p, int n, float radius, int sides,
-                      uint8_t r, uint8_t g, uint8_t b) {
+                      uint16_t color) {
     if (!p || n < 2) return;
     if (sides < 3) sides = 3;
     if (sides > 8) sides = 8;
@@ -135,8 +133,8 @@ inline void anim_tube(Anim_scratch &s, const Vec3 *p, int n, float radius, int s
         if (have) {
             for (int k = 0; k < sides; k++) {
                 int k1 = (k + 1) % sides;
-                anim_tri(s, prev[k], ring[k], ring[k1], r, g, b);
-                anim_tri(s, prev[k], ring[k1], prev[k1], r, g, b);
+                anim_tri(s, prev[k], ring[k], ring[k1], color);
+                anim_tri(s, prev[k], ring[k1], prev[k1], color);
             }
         }
         for (int k = 0; k < sides; k++) prev[k] = ring[k];
@@ -184,10 +182,9 @@ inline void anim_pack(const Anim_scratch &s, Vert *dst, int cap, Anim_mesh &m) {
             v.pos[k] = (int16_t)anim_q16((s.pos[i * 3 + k] - offset[k]) / scale * 32767.f);
         }
         vert_oct_encode(s.nrm[i * 3], s.nrm[i * 3 + 1], s.nrm[i * 3 + 2], v.nrm);
-        v.rgba[0] = s.col[i * 4];
-        v.rgba[1] = s.col[i * 4 + 1];
-        v.rgba[2] = s.col[i * 4 + 2];
-        v.rgba[3] = s.col[i * 4 + 3];
+        v.color = s.color[i];
+        v.spare[0] = 0;
+        v.spare[1] = 0;
     }
     m.verts = dst;
     m.count = n;

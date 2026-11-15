@@ -56,7 +56,8 @@ Models are included as headers and compiled in. Each vertex is 12 bytes, tightly
 |---|---|---|
 | 0 | `pos` | `int16[3]`, normalized, −32767..32767 maps to −1..1 |
 | 6 | `nrm` | `int8[2]`, octahedral unit normal, outward |
-| 8 | `rgba` | `uint8[4]`, alpha 255 |
+| 8 | `color` | `uint16`, index into the palette |
+| 10 | `spare` | `uint8[2]`, reserved, write zero |
 
 `engine/vert.h` is the `Vert` struct those headers include. A header named `Name` provides:
 
@@ -81,7 +82,38 @@ Each draw is one mesh and one transform, so parts of a model are separate header
 
 `models/examples/cube.h` is a 1-unit placeholder cube in that layout. Put your own headers in `models/` or next to the scene. Both `scenes/` and `models/` are gitignored except `scenes/examples/` and `models/examples/`.
 
-You can also build meshes in code (`anim_box`, `anim_cylinder_z`, `anim_tube`) into an `Anim_scratch`, then `anim_pack` them into a `Vert` buffer you own. `Anim_scratch` is large; keep it in static storage, not on the stack. Bump `mesh.rev` by calling `anim_pack` again when the bytes change so the viewer reuploads them.
+You can also build meshes in code (`anim_box`, `anim_cylinder_z`, `anim_tube`) into an `Anim_scratch`, then `anim_pack` them into a `Vert` buffer you own. Those builders take a palette index. `Anim_scratch` is large; keep it in static storage, not on the stack. Bump `mesh.rev` by calling `anim_pack` again when the bytes change so the viewer reuploads them.
+
+## Palette
+
+`color` is an index into one table of unlit RGB. The table lives in `palettes.h`. The engine includes that header when it is on the include path and binds it before `scene_init`. `models/palettes.h` is found before a `palettes.h` next to the scene. `scenes/examples/palettes.h` is the small example the starter uses.
+
+```cpp
+#pragma once
+#include <stdint.h>
+enum {
+    PAL_NONE = 0,
+    PAL_STONE = 1,
+    PAL_COUNT
+};
+static const uint8_t Anim_palette[][3] = {
+    { 0, 0, 0 },
+    { 196, 198, 202 },
+};
+static const int Anim_palette_count = PAL_COUNT;
+```
+
+Names are the global index stored in the vertex. Several palettes are concatenated into this one array. Rows are 3 bytes, R then G then B, 0..255, with no padding. Index 0 is reserved and black. `Anim_palette_count` matches the number of rows. The header includes `<stdint.h>` and nothing else. The full rules are in `engine/anim_palette.h`.
+
+A scene can replace the table after that:
+
+```cpp
+anim_palette_set(&Anim_palette[0][0], Anim_palette_count);
+```
+
+The pointer has to stay alive. With no `palettes.h` on the path, the viewer uses a built-in debug palette (16 colors, repeating) so the scene still builds and draws. An index past the end of the bound table draws magenta.
+
+The viewer looks the index up and shades that unlit RGB from the world-space normal with one fixed sun, then clamps to 1. The light is not baked into the vertex.
 
 ## An update
 
@@ -158,7 +190,7 @@ Keep the pooled struct plain. Spawn zeroes it with `memset`.
 - `anim_catenary(a, b, sag, t)` with `t` in 0..1. `sag` is the drop of the midpoint under the straight chord. The shape is a normalized cosh, not a tension solve.
 - `anim_path_build` / `anim_path_at` sample a polyline. Distance wraps, so `anim_path_at(path, pts, travel, &tangent)` loops.
 
-`anim_mesh.h` builds placeholder geometry and packs it with the same offset/scale rule as a model header. `anim.h` includes the lot for a scene file. An update header that must compile in an engine should include `anim_math.h` and `anim_out.h` only (and `anim_pool.h` if it uses pools).
+`anim_mesh.h` builds placeholder geometry and packs it with the same offset/scale rule as a model header. The color argument is a palette index. `anim.h` includes the lot for a scene file. An update header that must compile in an engine should include `anim_math.h` and `anim_out.h` only (and `anim_pool.h` if it uses pools).
 
 Caps live next to the types they bound: `ANIM_PART_MAX`, `ANIM_EVENT_MAX`, `ANIM_PAYLOAD`, `ANIM_PATH_MAX`, `ANIM_SCRATCH_MAX`, `ANIM_SLIDER_MAX`, `ANIM_DRAW_MAX`. The viewer also keeps a fixed GPU-buffer cache (96 meshes).
 
