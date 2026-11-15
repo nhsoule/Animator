@@ -10,3 +10,4 @@
 #include "anim_pool.h"
 #include "anim_mesh.h"
 #include "anim_host.h"
+#include "anim_palette.h"

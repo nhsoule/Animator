@@ -33,6 +33,11 @@ static Cube_state g_state;
 static Anim_mesh g_mesh;
 
 void scene_init() {
+    // palettes.h on the include path (this directory, or models/) is already
+    // included. Hand that table to the viewer. With no header, the fallback stays.
+#if __has_include("palettes.h")
+    anim_palette_set(&Anim_palette[0][0], Anim_palette_count);
+#endif
     anim_slider("spin", &g_spin, -4.f, 4.f);
     anim_mesh_view(g_mesh, Cube_verts, Cube_vert_count, Cube_offset, Cube_scale);
 }

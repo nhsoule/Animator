@@ -78,8 +78,62 @@ static GLint g_u_vp = -1;
 static GLint g_u_model = -1;
 static GLint g_u_offset = -1;
 static GLint g_u_scale = -1;
+static GLint g_u_palette = -1;
+static GLint g_u_palette_count = -1;
+static GLint g_u_palette_rows = -1;
 static GLint g_u_line_vp = -1;
 static GLint g_u_line_color = -1;
+
+//----- Palette -----||
+// One 256-wide RGBA texture. Index i is texel (i % 256, i / 256). The shader
+// rejects an index past the bound count. A missing palettes.h repeats 16
+// debug colors across the whole uint16 range so every index still draws.
+
+enum { PAL_TEX_W = 256 };
+enum { PAL_TEX_MAX = 65536 };
+
+static const uint8_t *g_pal_rgb = 0;
+static int g_pal_count = 0;
+static int g_pal_repeat = 0;
+static int g_pal_rev = 0;
+static int g_pal_uploaded = -1;
+static int g_pal_rows_live = 1;
+static int g_pal_count_live = 0;
+static GLuint g_pal_tex = 0;
+static uint8_t g_pal_image[PAL_TEX_MAX * 4];
+
+static const uint8_t g_pal_debug[16][3] = {
+    { 168, 170, 176 },
+    { 196, 198, 202 },
+    { 146, 168, 132 },
+    { 206, 186, 140 },
+    { 176, 140, 118 },
+    { 140, 166, 196 },
+    { 186, 150, 150 },
+    { 160, 150, 186 },
+    { 120, 120, 124 },
+    { 220, 220, 216 },
+    { 110, 150, 120 },
+    { 210, 170, 110 },
+    { 150, 110, 90 },
+    { 90, 130, 170 },
+    { 170, 110, 120 },
+    { 130, 110, 160 },
+};
+
+void anim_palette_set(const uint8_t *rgb, int count) {
+    if (!rgb || count < 1) {
+        g_pal_rgb = &g_pal_debug[0][0];
+        g_pal_count = 16;
+        g_pal_repeat = 1;
+    } else {
+        if (count > PAL_TEX_MAX) count = PAL_TEX_MAX;
+        g_pal_rgb = rgb;
+        g_pal_count = count;
+        g_pal_repeat = 0;
+    }
+    g_pal_rev++;
+}
 
 //----- Camera -----||
 // Orbit, pan, and zoom match Vert_Modeler: yaw -= dx*0.01, pitch += dy*0.01
@@ -329,13 +383,17 @@ static void pointer_at(float x, float y) {
 
 static const char *MESH_VS = R"glsl(#version 300 es
 precision highp float;
+precision highp int;
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aNrm;
-layout(location = 2) in vec4 aCol;
+layout(location = 2) in uint aCol;
 uniform mat4 uViewProj;
 uniform mat4 uModel;
 uniform vec3 uOffset;
 uniform float uScale;
+uniform sampler2D uPalette;
+uniform int uPaletteCount;
+uniform float uPaletteRows;
 out vec3 vN;
 out vec3 vC;
 vec3 octDecode(vec2 e) {
@@ -346,26 +404,36 @@ vec3 octDecode(vec2 e) {
     }
     return normalize(n);
 }
+vec3 paletteRgb(uint i) {
+    if (uPaletteCount <= 0 || i >= uint(uPaletteCount)) return vec3(1.0, 0.0, 1.0);
+    float x = (float(i & 255u) + 0.5) / 256.0;
+    float y = (float(i >> 8u) + 0.5) / uPaletteRows;
+    return texture(uPalette, vec2(x, y)).rgb;
+}
 void main() {
     vec3 local = uOffset + aPos * uScale;
     vec4 world = uModel * vec4(local, 1.0);
     gl_Position = uViewProj * world;
     vN = mat3(transpose(inverse(uModel))) * octDecode(aNrm);
-    vC = aCol.rgb;
+    vC = paletteRgb(aCol);
 }
 )glsl";
 
+// Unlit palette RGB times one sun, clamped to 1. Same look as the old bake:
+//   rgb * ((0.56, 0.52, 0.70) + (0.44, 0.42, 0.16) * max(0, dot(n, sun)))
+//   sun = (0.0000, -0.5890, 0.8081)
+// n is the world-space unit normal.
 static const char *MESH_FS = R"glsl(#version 300 es
-precision mediump float;
+precision highp float;
 in vec3 vN;
 in vec3 vC;
 out vec4 frag;
 void main() {
     vec3 n = normalize(vN);
-    vec3 sun = normalize(vec3(0.35, 0.45, 0.82));
+    vec3 sun = vec3(0.0000, -0.5890, 0.8081);
     float d = max(dot(n, sun), 0.0);
-    vec3 c = vC * (vec3(0.46, 0.46, 0.50) + vec3(0.54, 0.52, 0.46) * d);
-    frag = vec4(c, 1.0);
+    vec3 c = vC * (vec3(0.56, 0.52, 0.70) + vec3(0.44, 0.42, 0.16) * d);
+    frag = vec4(min(c, vec3(1.0)), 1.0);
 }
 )glsl";
 
@@ -457,7 +525,16 @@ static void init_gl() {
         g_u_model = glGetUniformLocation(g_prog, "uModel");
         g_u_offset = glGetUniformLocation(g_prog, "uOffset");
         g_u_scale = glGetUniformLocation(g_prog, "uScale");
+        g_u_palette = glGetUniformLocation(g_prog, "uPalette");
+        g_u_palette_count = glGetUniformLocation(g_prog, "uPaletteCount");
+        g_u_palette_rows = glGetUniformLocation(g_prog, "uPaletteRows");
     }
+    glGenTextures(1, &g_pal_tex);
+    glBindTexture(GL_TEXTURE_2D, g_pal_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     if (g_line_prog) {
         g_u_line_vp = glGetUniformLocation(g_line_prog, "uViewProj");
         g_u_line_color = glGetUniformLocation(g_line_prog, "uColor");
@@ -510,6 +587,32 @@ static void resize() {
     g_view_h = h;
     emscripten_set_canvas_element_size("#canvas", w, h);
     glViewport(0, 0, w, h);
+}
+
+static void palette_upload() {
+    if (g_pal_count < 1 || !g_pal_rgb) anim_palette_set(0, 0);
+    if (g_pal_uploaded == g_pal_rev) return;
+    int n = g_pal_repeat ? PAL_TEX_MAX : g_pal_count;
+    if (n < 1) n = 1;
+    if (n > PAL_TEX_MAX) n = PAL_TEX_MAX;
+    int rows = (n + PAL_TEX_W - 1) / PAL_TEX_W;
+    if (rows < 1) rows = 1;
+    int texels = rows * PAL_TEX_W;
+    for (int i = 0; i < texels; i++) {
+        int src = 0;
+        if (i < n && g_pal_count > 0) src = g_pal_repeat ? (i % g_pal_count) : i;
+        const uint8_t *c = g_pal_rgb + src * 3;
+        g_pal_image[i * 4 + 0] = (i < n) ? c[0] : 255;
+        g_pal_image[i * 4 + 1] = (i < n) ? c[1] : 0;
+        g_pal_image[i * 4 + 2] = (i < n) ? c[2] : 255;
+        g_pal_image[i * 4 + 3] = 255;
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_pal_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, PAL_TEX_W, rows, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_pal_image);
+    g_pal_uploaded = g_pal_rev;
+    g_pal_rows_live = rows;
+    g_pal_count_live = n;
 }
 
 static GLuint mesh_vbo(const Draw &d) {
@@ -567,6 +670,12 @@ static void render() {
     if (!g_prog) return;
     glUseProgram(g_prog);
     glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, vp);
+    palette_upload();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_pal_tex);
+    glUniform1i(g_u_palette, 0);
+    glUniform1i(g_u_palette_count, g_pal_count_live);
+    glUniform1f(g_u_palette_rows, (float)g_pal_rows_live);
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2);
@@ -583,7 +692,7 @@ static void render() {
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glVertexAttribPointer(0, 3, GL_SHORT, GL_TRUE, 12, (void *)0);
         glVertexAttribPointer(1, 2, GL_BYTE, GL_TRUE, 12, (void *)6);
-        glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 12, (void *)8);
+        glVertexAttribIPointer(2, 1, GL_UNSIGNED_SHORT, 12, (void *)8);
         glDrawArrays(GL_TRIANGLES, 0, d.count);
     }
 }
@@ -651,6 +760,7 @@ void anim_start() {
     g_started = 1;
     if (!init_context()) return;
     init_gl();
+    anim_palette_bind_default();
     scene_init();
     g_last_ms = emscripten_get_now();
     emscripten_set_main_loop(frame, 0, 0);

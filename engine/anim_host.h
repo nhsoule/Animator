@@ -30,6 +30,7 @@ void anim_slider(const char *name, float *value, float minv, float maxv);
 
 void anim_draw(const Anim_mesh &mesh, const Transform &xf);
 
-// The scene file defines these two.
+// The scene file defines these two. scene_init runs after the palette table
+// from palettes.h is bound (anim_palette.h). anim_palette_set replaces it.
 void scene_init();
 void scene_tick(const Anim_frame &frame);
